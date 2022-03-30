@@ -1,0 +1,116 @@
+install.packages("raster")
+install.packages("rgdal")
+install.packages("sp")
+install.packages("dplyr")
+install.packages("DMwR")
+install.packages("caret")
+install.packages("snow")
+install.packages("rgeos")
+install.packages("maptools")
+install.packages("gdalUtils")
+
+library(raster)
+library(rgdal)
+library(sp)
+library(dplyr)
+library(DMwR)
+library(caret)
+library(snow)
+library(rgeos)
+library(maptools)
+library(gdalUtils)
+
+#create non-landslide data
+#load slope
+slope <- raster("slope.tif")
+reclass_df <- c(0, 10, 1, 10, Inf, NA)
+reclass_m <- matrix(reclass_df, ncol = 3, byrow = TRUE)
+reclass_m 
+slope_classified <- reclassify(slope, reclass_m)
+r.to.poly<-rasterToPolygons(slope_classified, dissolve = T)
+writeOGR(r.to.poly, ".", "slope_no_ls", driver="ESRI Shapefile")
+ls=readOGR("Landslides.shp")
+ls <- spTransform(ls, CRS = CRS(proj4string(slope)))
+writeOGR(ls, ".", "ls", driver="ESRI Shapefile")
+ls
+no.ls<-spsample(r.to.poly,n=100,"random")
+no.ls <- spTransform(no.ls, CRS = CRS(proj4string(slope)))
+no.ls.spdf <- as(no.ls,"SpatialPointsDataFrame")
+df <- as.data.frame(no.ls.spdf@coords)
+write.csv(df, file="no_ls.csv")
+
+#create merged raster
+#load raster
+slope <- raster("slope.tif")
+ndvi <- raster("ndvi.tif")
+landcover <- raster("landcover.tif")
+elevation <- raster("elevation.tif")
+curvature <- raster("curvature.tif")
+#merged raster
+a <- c('slope.tif', 'ndvi.tif', 'landcover.tif', 'elevation.tif','curvature.tif')
+e <- extent(slope)
+template <- raster(e)
+proj4string(template) <- CRS('+init=epsg:23037')
+writeRaster(template, file="merged.tif", format="GTiff")
+mosaic_rasters(gdalfile=a,dst_dataset="merged.tif",of="GTiff",separate=TRUE)
+
+##################################################################
+rasstack=stack("merged.tif")
+point=readOGR("raw.shp")
+rasvalue=extract(rasstack,point)
+combined=cbind(point,rasvalue)
+head(combined)
+colnames(combined@data)[3] = "class"
+colnames(combined@data)[4] = "B1"
+colnames(combined@data)[5] = "B2"
+colnames(combined@data)[6] = "B3"
+colnames(combined@data)[7] = "B4"
+colnames(combined@data)[8] = "B5"
+
+
+
+combined@data %>%
+  group_by(class) %>%
+  summarise(
+          count = n()
+            )
+
+val=combined@data
+val <- na.omit(val)
+val=val[sample(nrow(val)),]
+val$class = as.factor(val$class)
+
+N_FILES=199
+SPLT=0.8 #80% train
+b = floor(SPLT*N_FILES)
+train = val[1:b,]
+test = val[(b+1):N_FILES,]
+modFit_rf <- caret::train(class ~ B1+B2+B3+B4+B5, method = "rf", data=train)
+
+validation_result<-predict(modFit_rf,newdata=test)
+result_comparison<-cbind(as.numeric(as.character(validation_result)),test[,3])
+preds<-result_comparison[,1]
+y<-result_comparison[,2]
+confmat <- confusionMatrix(as.factor(y),as.factor(preds), positive='2')
+library(pROC)
+kurva_roc<-roc(preds, y, levels=c("1", "2"))
+
+img_subset <- brick("merged.tif")
+names(img_subset) <- c(paste0("B", 1:5, coll = ""))
+
+#image prediction and write image
+beginCluster()
+preds_rf <- clusterR(img_subset, raster::predict, args = list(model = modFit_rf))
+endCluster()
+plot(preds_rf)
+writeRaster(preds_rf, "rf_result_ls_pred", format = "GTiff", overwrite=TRUE)
+gc()
+
+################################################################################################
+
+
+
+#unused code
+a_crs_object_epsg <- crs("+proj=utm +zone=37 +ellps=intl +units=m +no_defs")
+ls <- spTransform(ls, CRS = CRS(proj4string(slope)))
+epsg:23037
